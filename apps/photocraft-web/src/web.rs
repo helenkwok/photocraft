@@ -57,6 +57,20 @@ pub fn start() {
         };
         let q = query();
         let force_cpu = q.contains("cpu");
+        // Host modes: `?host=parent` — a same-origin page framing PhotoCraft in an `<iframe>` —
+        // opens documents in it and stores what it saves (`host`); unframed there is no parent,
+        // so that URL on its own stays the normal app with downloads. `data-host="page"` on the
+        // canvas opts a page in instead: it runs PhotoCraft in its own document and talks over
+        // DOM `CustomEvent`s on the canvas (`host`, `hostmode`). The host hears `photocraft:dirty`
+        // and guards leaving the page itself, so the browser's own guard is skipped.
+        let bridge = if query_param("host").as_deref() == Some("parent") {
+            crate::host::Bridge::new()
+        } else if crate::hostmode::page_host_requested(canvas.get_attribute("data-host").as_deref()) {
+            Some(crate::host::Bridge::for_page(&canvas))
+        } else {
+            None
+        };
+        let app_bridge = bridge.clone();
         let mut options = eframe::WebOptions::default();
         photocraft_ui_egui::gpu_canvas::use_adapter_limits(&mut options.wgpu_options.wgpu_setup);
         if q.contains("webgl")
@@ -89,7 +103,11 @@ pub fn start() {
                     let (session, warnings) = crate::preset_bridge::session(presets.clone());
                     preset_warnings.extend(warnings);
                     let drag = listen_drag(&pen_target);
-                    let mut app = PhotocraftApp::new(session, services(inbox.clone(), place_inbox.clone(), drag_pos_service(pen_target.clone(), drag)));
+                    let mut app_services = services(inbox.clone(), place_inbox.clone(), drag_pos_service(pen_target.clone(), drag));
+                    if let Some(bridge) = &app_bridge {
+                        bridge.connect(&mut app_services, inbox.clone(), cc.egui_ctx.clone());
+                    }
+                    let mut app = PhotocraftApp::new(session, app_services);
                     if !preset_warnings.is_empty() {
                         photocraft_ui_egui::notices::post(&mut app, i18n::t("Some brush presets could not be loaded"), preset_warnings, true, None);
                     }
@@ -102,11 +120,20 @@ pub fn start() {
                         app.set_wgpu(rs);
                     }
                     let unsaved = Arc::new(AtomicBool::new(false));
-                    guard_unload(unsaved.clone());
-                    Ok(Box::new(WebShell { app, inbox, place_inbox, unsaved, served, database, presets }))
+                    if app_bridge.is_none() {
+                        guard_unload(unsaved.clone());
+                    }
+                    Ok(Box::new(WebShell { app, inbox, place_inbox, unsaved, served, database, presets, bridge: app_bridge }))
                 }),
             )
             .await;
+        // Ready only once the runner is up: starting can still fail after the app is made.
+        if let Some(bridge) = &bridge {
+            match &result {
+                Ok(()) => bridge.post_ready(),
+                Err(e) => bridge.post_failed(&format!("{e:?}")),
+            }
+        }
         if let Some(el) = document.get_element_by_id("photocraft_loading") {
             match result {
                 Ok(()) => el.remove(),
@@ -200,6 +227,11 @@ fn query() -> String {
     web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default()
 }
 
+/// One URL query parameter's value (`?key=…`), if present.
+fn query_param(key: &str) -> Option<String> {
+    web_sys::UrlSearchParams::new_with_str(&query()).ok()?.get(key)
+}
+
 /// Reads the served font manifest, if the host has one, and lists its families in the font menus.
 fn load_font_manifest(served: Served, ctx: egui::Context) {
     wasm_bindgen_futures::spawn_local(async move {
@@ -270,6 +302,9 @@ struct WebShell {
     served: Served,
     database: Option<web_sys::IdbDatabase>,
     presets: crate::preset_bridge::Bridge,
+    /// The host bridge in host mode ([`crate::host`]); the shell hands it each frame's written
+    /// files and unsaved-changes state ([`crate::host::Bridge::sync`]).
+    bridge: Option<crate::host::Bridge>,
 }
 
 impl WebShell {
@@ -364,6 +399,9 @@ impl eframe::App for WebShell {
         self.app.logic_frame(ctx, frame);
         self.save_presets(ctx);
         self.app.finish_type_reset_logic(ctx);
+        if let Some(bridge) = &self.bridge {
+            bridge.sync(&self.app);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -393,6 +431,9 @@ impl eframe::App for WebShell {
         self.app.ui_frame(ui, frame);
         self.save_presets(ui.ctx());
         self.app.finish_type_reset_pass(ui.ctx());
+        if let Some(bridge) = &self.bridge {
+            bridge.sync(&self.app);
+        }
     }
 }
 
