@@ -211,6 +211,86 @@ fetches them with `fetch()`, so a Content Security Policy needs them allowed by 
   downloads) are blocked.
 - Don't send `X-Frame-Options: DENY` or a `frame-ancestors` CSP that excludes the embedding page.
 
+## The parent bridge (`?host=parent`)
+
+A page framing PhotoCraft in a **same-origin** iframe can add `?host=parent` to the iframe's URL
+(`https://example.com/photocraft/?host=parent`) and have PhotoCraft hand its files over instead of
+downloading them. The two sides talk `postMessage` with plain window messages that carry a `type`:
+
+| Message | Direction | Fields |
+|---|---|---|
+| `photocraft:ready` | app → page | `version`: the app is running and listening; send a file now |
+| `photocraft:open` | page → app | `name`, `bytes` (an `ArrayBuffer` or `Uint8Array`): open like File › Open, or like a drop on the window (a `.abr`, `.grd`, `.asl`, `.aco`/`.act`/`.ase` loads into its preset library). A payload over 512 MiB is refused, and a malformed one is ignored |
+| `photocraft:save` | app → page | `name`, `saveAs`, `bytes` (a transferred `ArrayBuffer`): every file the app would otherwise download (Save, Save As, Save a Copy, exports, Save for Web). The page stores it and reports failures itself. `saveAs` says whether the file became the document's file: `false` for a Save of the file the page opened, under its own name, and for copies and exports that don't become the document (Save a Copy, formats that can't hold the layers, rendered images, PDFs); `true` for a Save As to a new name and for a Save of a document the page never sent (an untitled document, or an import that changes format, like a .pdn suggested as .pcraft), after which the next Save carries that name with `false` |
+| `photocraft:dirty` | app → page | `dirty`: unsaved changes appeared or went away (a save that reaches the page counts as written, so it clears) |
+| `photocraft:failed` | app → page | `error`: the app couldn't start (no WebGPU or WebGL2, for example) |
+
+In host mode the app starts on its empty workspace, so the framing page should send the file to
+edit and guard leaving the page while changes are unsaved. Opening `?host=parent` outside an
+iframe gives the normal app with downloads. A sandboxed iframe without `allow-same-origin` has
+no bridge either: its origin is opaque, so the app falls back to the normal app with downloads.
+
+## Same-document host mode (no iframe)
+
+A host application can also run PhotoCraft from its own document: it loads the module itself and
+gives PhotoCraft one of its own canvases, so there is no iframe and no `?host=parent`. It opts in
+with `data-host="page"` on that canvas — the exact value `page` — and the canvas keeps the id the
+app looks up (`id="photocraft_canvas"`).
+
+```html
+<canvas id="photocraft_canvas" data-host="page" style="width: 100%; height: 720px; display: block;"></canvas>
+```
+
+The page and the app then talk with DOM `CustomEvent`s on the canvas instead of `postMessage`.
+The app dispatches the same messages it would post to a parent — `photocraft:ready`,
+`photocraft:save`, `photocraft:dirty`, `photocraft:failed` — with the message fields (without the
+`type`) as the event's `detail`, and it opens a document when the page dispatches a
+`photocraft:open` event with `detail: { name, bytes }`. Events do not bubble, so listen on the
+canvas itself (two editors on one page can't hear each other).
+
+Add the listeners before the app starts: the app announces itself with `photocraft:ready` while
+it is still starting, and a file sent in reply would otherwise be missed.
+
+```js
+import init from "./photocraft-web-<hash>.js"; // the wasm-bindgen glue shipped with a trunk build
+
+const canvas = document.getElementById("photocraft_canvas");
+
+canvas.addEventListener("photocraft:ready", async () => {
+  // The app is listening; hand it a document now, if you have one.
+  const bytes = await documentBytes(); // an ArrayBuffer or Uint8Array
+  canvas.dispatchEvent(new CustomEvent("photocraft:open", {
+    detail: { name: "Flyer.psd", bytes },
+  }));
+});
+
+// Every file PhotoCraft would otherwise download (Save, Save As, Save a Copy, exports) arrives here.
+canvas.addEventListener("photocraft:save", (event) => {
+  const { name, saveAs, bytes } = event.detail; // bytes is an ArrayBuffer
+  // Store the file under `name`; `saveAs` says whether it became the document's file.
+  // Report your own errors.
+  storeFile(name, bytes, saveAs);
+});
+canvas.addEventListener("photocraft:dirty", (event) => {
+  unsaved = event.detail.dirty; // warn before leaving, as you like
+});
+canvas.addEventListener("photocraft:failed", (event) => {
+  showError(event.detail.error); // the app couldn't start
+});
+
+await init({ module_or_path: "./photocraft-web-<hash>_bg.wasm" });
+```
+
+- Saves are not downloads in this mode: the `bytes` in `photocraft:save` hold the saved file, and
+  the host decides where it goes.
+- An unframed page that uses `?host=parent` keeps the normal app with downloads; only the exact
+  `data-host` value `page` turns this mode on.
+- The release zip above doesn't hold the WebAssembly as one file: it starts the app from its
+  compressed parts, with `photocraft-web-boot-<hash>.js` fetching the parts and calling the
+  app's `init` itself. A same-document host imports that boot module and starts it with `await
+  init()` instead of the glue and the `.wasm`, and adds the same listeners on the same canvas
+  before it does.
+
 ## Renderer selection and fallback flags
 
 PhotoCraft renders with wgpu. It uses **WebGPU** when the browser has it and falls back to

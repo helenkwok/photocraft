@@ -8,17 +8,24 @@
 //! - no TCP control server (browsers can't listen on sockets);
 //! - file pickers return browser file contents asynchronously through `Services::file_dialog`;
 //!   this includes File → Open and commands such as Place Embedded;
-//! - saving/exporting triggers a browser download;
+//! - saving/exporting triggers a browser download; in host mode (`?host=parent`, or
+//!   `data-host="page"` on the canvas) every such file goes to the embedding page instead, which
+//!   also opens documents and hears about unsaved changes (`host`);
 //! - dropped files are read asynchronously by `web::WebShell` and delivered through `Services::inbox`.
 //!
 //! URL query flags: `?cpu` forces the CPU canvas path (same as `PHOTOCRAFT_CPU_CANVAS=1`);
-//! `?webgl` forces the WebGL2 backend instead of WebGPU.
+//! `?webgl` forces the WebGL2 backend instead of WebGPU; `?host=parent` turns a same-origin
+//! framing page into the host that opens documents and takes saves (`host`).
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 #[cfg(any(target_arch = "wasm32", test))]
+mod hostmode;
+#[cfg(any(target_arch = "wasm32", test))]
 mod preset_bridge;
 
+#[cfg(target_arch = "wasm32")]
+mod host;
 #[cfg(target_arch = "wasm32")]
 mod indexed_presets;
 
