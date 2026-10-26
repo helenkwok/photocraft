@@ -1,0 +1,29 @@
+name: Check build (web)
+# Fork-only: builds the browser release of this branch with trunk and uploads the site, so it can be tested in a browser.
+on:
+  push:
+    branches: ['od-check/**']
+permissions:
+  contents: read
+jobs:
+  web:
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install trunk
+        run: |
+          curl --proto '=https' -fsSL "https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz" | tar -xz -C "$HOME/.cargo/bin" trunk
+          trunk --version
+      - name: Build the browser release
+        run: cd apps/photocraft-web && trunk build --release --dist "$GITHUB_WORKSPACE/site" --public-url ./
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: photocraft-web
+          path: site
+          retention-days: 7
